@@ -27,6 +27,9 @@ export interface LiveSignal {
   /** Raw engagement (upvotes/points/traffic estimate). */
   score: number;
   ageHours: number;
+  /** Market associated with country-specific Google Trends signals. */
+  countryCode?: string;
+  countryName?: string;
 }
 
 const CACHE_KEY = "prodintel_signals_cache";
@@ -130,13 +133,14 @@ async function fetchHackerNews(): Promise<LiveSignal[]> {
 async function fetchTrendsViaServer(): Promise<LiveSignal[]> {
   const { signal, done } = withTimeout();
   try {
-    const res = await fetch("/api/signals", { signal });
+    const markets = "US,ES,MX,EC,CL,GT,PT";
+    const res = await fetch(`/api/signals?countries=${markets}`, { signal });
     if (!res.ok) return [];
     const data = await res.json();
     const trends: LiveSignal[] = Array.isArray(data?.signals)
       ? data.signals.filter((s: any) => s?.source === "googletrends")
       : [];
-    return trends.slice(0, 25);
+    return trends.slice(0, 140);
   } catch {
     return []; // static hosting / local dev — honest degradation
   } finally {
@@ -196,7 +200,8 @@ export function signalsToPromptContext(signals: LiveSignal[], max = 18): string 
   if (!signals.length) return "";
   const lines = signals.slice(0, max).map((s, i) => {
     const origin = s.source === "reddit" ? "Reddit" : s.source === "hackernews" ? "HackerNews" : "GoogleTrends";
-    return `${i + 1}. [${origin}] ${s.title} — ${s.url} (engagement: ${s.score}, ${Math.round(s.ageHours)}h old)`;
+    const market = s.countryCode ? ` [${s.countryCode}]` : "";
+    return `${i + 1}. [${origin}]${market} ${s.title} — ${s.url} (engagement: ${s.score}, ${Math.round(s.ageHours)}h old)`;
   });
   return lines.join("\n");
 }
