@@ -151,17 +151,45 @@ async function fetchTrendsViaServer(): Promise<LiveSignal[]> {
 // ---------- aggregation ----------
 
 function dedupeAndRank(signals: LiveSignal[]): LiveSignal[] {
-  const byUrl = new Map<string, LiveSignal>();
+  const bySourceAndUrl = new Map<string, LiveSignal>();
   for (const s of signals) {
     if (!s.title || !s.url) continue;
-    const prev = byUrl.get(s.url);
-    if (!prev || prev.score < s.score) byUrl.set(s.url, s);
+    // Keep the same news URL distinct when it is a trend signal for different markets.
+    const key = `${s.source === "googletrends" ? (s.countryCode || "unknown") : "global"}|${s.url}`;
+    const prev = bySourceAndUrl.get(key);
+    if (!prev || prev.score < s.score) bySourceAndUrl.set(key, s);
   }
-  // engagement decays with age; fresh + hot first
-  return [...byUrl.values()]
+
+  const ranked = [...bySourceAndUrl.values()]
     .map((s) => ({ ...s, heat: s.score / (1 + s.ageHours / 6) }))
-    .sort((a: any, b: any) => b.heat - a.heat)
-    .slice(0, 40);
+    .sort((a: any, b: any) => b.heat - a.heat);
+
+  // Reserve room for every configured market before filling with global signals.
+  const markets = ["US", "ES", "MX", "EC", "CL", "GT", "PT"];
+  const trendsByMarket = new Map<string, typeof ranked>();
+  for (const market of markets) {
+    trendsByMarket.set(
+      market,
+      ranked.filter((s) => s.source === "googletrends" && s.countryCode === market)
+    );
+  }
+
+  const balanced: typeof ranked = [];
+  for (let slot = 0; slot < 6; slot++) {
+    for (const market of markets) {
+      const item = trendsByMarket.get(market)?.[slot];
+      if (item) balanced.push(item);
+    }
+  }
+
+  const balancedKeys = new Set(balanced.map((s) =>
+    `${s.source === "googletrends" ? (s.countryCode || "unknown") : "global"}|${s.url}`
+  ));
+  const remainder = ranked.filter((s) => !balancedKeys.has(
+    `${s.source === "googletrends" ? (s.countryCode || "unknown") : "global"}|${s.url}`
+  ));
+
+  return [...balanced, ...remainder].slice(0, 60);
 }
 
 interface CacheShape { at: number; items: LiveSignal[] }
@@ -198,7 +226,32 @@ export async function getLiveSignals(): Promise<LiveSignal[]> {
 /** Compact prompt block so ANY model can cite REAL, just-scraped URLs. */
 export function signalsToPromptContext(signals: LiveSignal[], max = 18): string {
   if (!signals.length) return "";
-  const lines = signals.slice(0, max).map((s, i) => {
+  const markets = ["US", "ES", "MX", "EC", "CL", "GT", "PT"];
+  const perMarket = new Map<string, LiveSignal[]>();
+  for (const market of markets) {
+    perMarket.set(market, signals.filter((s) => s.source === "googletrends" && s.countryCode === market));
+  }
+
+  // Round-robin market evidence so the prompt does not accidentally ignore countries.
+  const selected: LiveSignal[] = [];
+  for (let slot = 0; slot < 2 && selected.length < max; slot++) {
+    for (const market of markets) {
+      const item = perMarket.get(market)?.[slot];
+      if (item && selected.length < max) selected.push(item);
+    }
+  }
+  const selectedIds = new Set(selected.map((s) => `${s.countryCode}|${s.url}`));
+  for (const s of signals) {
+    if (selected.length >= max) break;
+    if (s.source === "googletrends" && s.countryCode) continue;
+    const id = `${s.countryCode || "global"}|${s.url}`;
+    if (!selectedIds.has(id)) {
+      selected.push(s);
+      selectedIds.add(id);
+    }
+  }
+
+  const lines = selected.slice(0, max).map((s, i) => {
     const origin = s.source === "reddit" ? "Reddit" : s.source === "hackernews" ? "HackerNews" : "GoogleTrends";
     const market = s.countryCode ? ` [${s.countryCode}]` : "";
     return `${i + 1}. [${origin}]${market} ${s.title} — ${s.url} (engagement: ${s.score}, ${Math.round(s.ageHours)}h old)`;
