@@ -158,7 +158,7 @@ export default async function handler(req: Request): Promise<Response> {
 
   const requestUrl = new URL(req.url);
   if (requestUrl.searchParams.has("probe")) {
-    return json({ probe: true, service: "prodintel-signals", version: "v5" });
+    return json({ probe: true, service: "prodintel-signals", version: "v5.2-multicountry" });
   }
 
   const countryNames: Record<string, string> = {
