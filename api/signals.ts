@@ -84,7 +84,7 @@ const REDDIT_SUBS = ["dropship", "ecommerce", "Entrepreneur", "BusinessIdeas", "
 
 /** Country allowlist for Google Trends (strict SSRF/input hygiene). */
 const ALLOWED_GEOS = new Set([
-  "US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "MX", "BR", "AR", "CL", "CO", "PE",
+  "US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "MX", "BR", "AR", "CL", "CO", "PE", "EC", "GT",
   "NL", "SE", "PL", "JP", "KR", "IN", "CN", "HK", "TW", "SG", "AE", "SA", "ZA", "NG",
   "EG", "TR", "RU", "UA", "ID", "PH", "TH", "VN", "MY", "NZ", "IE", "CH", "AT", "BE",
   "DK", "NO", "FI", "PT", "GR", "CZ", "RO", "HU", "IL",
@@ -158,27 +158,59 @@ export default async function handler(req: Request): Promise<Response> {
 
   const requestUrl = new URL(req.url);
   if (requestUrl.searchParams.has("probe")) {
-    return json({ probe: true, service: "prodintel-signals", version: "v5" });
+    return json({ probe: true, service: "prodintel-signals", version: "v5.2-multicountry" });
   }
 
-  const rawGeo = (requestUrl.searchParams.get("geo") || "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
+  const countryNames: Record<string, string> = {
+    US: "United States",
+    ES: "Spain",
+    MX: "Mexico",
+    EC: "Ecuador",
+    CL: "Chile",
+    GT: "Guatemala",
+    PT: "Portugal",
+  };
+  const rawGeo = (requestUrl.searchParams.get("geo") || "US").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
   const geo = ALLOWED_GEOS.has(rawGeo) ? rawGeo : "US";
-  const trendsUrl = `https://trends.google.com/trending/rss?geo=${geo}`;
+  const rawCountries = requestUrl.searchParams.get("countries");
+  // Only the seven configured radar markets are accepted for batch mode.
+  const radarCountries = ["US", "ES", "MX", "EC", "CL", "GT", "PT"];
+  const countries = rawCountries
+    ? [...new Set(rawCountries.toUpperCase().split(",").map((v) => v.trim()).filter((v) => radarCountries.includes(v) && ALLOWED_GEOS.has(v)))].slice(0, 7)
+    : [geo];
+  const selectedCountries = countries.length ? countries : [geo];
 
-  const [trendsRes, reddit, hn] = await Promise.all([
-    fetchWithTimeout(trendsUrl, 7000),
+  const [trendResults, reddit, hn] = await Promise.all([
+    Promise.all(selectedCountries.map(async (country) => {
+      const trendsUrl = `https://trends.google.com/trending/rss?geo=${country}`;
+      const response = await fetchWithTimeout(trendsUrl, 7000);
+      const items = response ? parseTrendsRss(await response.text(), country) : [];
+      return {
+        country,
+        items: items.map((item) => ({
+          ...item,
+          countryCode: country,
+          countryName: countryNames[country] || country,
+        })),
+      };
+    })),
     redditSignals(),
     hnSignals(),
   ]);
 
-  const trends = trendsRes ? parseTrendsRss(await trendsRes.text(), geo) : [];
+  const trends = trendResults.flatMap((result) => result.items);
+  const trendsByCountry = Object.fromEntries(
+    trendResults.map((result) => [result.country, result.items.length])
+  );
 
   return json({
     service: "prodintel-signals",
-    version: "v5",
-    geo,
+    version: "v5.2-multicountry",
+    geo: selectedCountries.length === 1 ? selectedCountries[0] : null,
+    countries: selectedCountries,
     sources: {
       googletrends: trends.length,
+      googletrendsByCountry: trendsByCountry,
       reddit: reddit.length,
       hackernews: hn.length,
     },
@@ -186,7 +218,7 @@ export default async function handler(req: Request): Promise<Response> {
       ...trends.map((t) => ({ ...t, source: "googletrends" as const, ageHours: 6 })),
       ...hn.map((s) => ({ ...s, source: "hackernews" as const, ageHours: 24 })),
       ...reddit.map((s) => ({ ...s, source: "reddit" as const, ageHours: 12 })),
-    ].slice(0, 60),
+    ].slice(0, 180),
     checked_at: new Date().toISOString(),
   });
 }
