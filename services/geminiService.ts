@@ -148,24 +148,29 @@ These are REAL URLs you may cite as sourceUrl/sourceTitle when they genuinely re
   }
 };
 
-/** Attach a REAL signal URL to products that came back without a source. */
-const attachSignalSources = (products: WinningProductRaw[], signals: Awaited<ReturnType<typeof getLiveSignals>>) => {
-  if (!signals.length) return;
-  const unused = [...signals];
-  const wordsOf = (s: string) =>
-    s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
-  for (const p of products) {
-    const ok = typeof p.sourceUrl === "string" && p.sourceUrl.startsWith("http");
-    if (ok || !p.name) continue;
-    const pw = new Set(wordsOf(p.name));
-    const match =
-      unused.find((s) => wordsOf(s.title).some((w) => pw.has(w))) || unused.shift();
-    if (match) {
-      p.sourceUrl = match.url;
-      p.sourceTitle = p.sourceTitle || match.title;
-      const idx = unused.indexOf(match);
-      if (idx >= 0) unused.splice(idx, 1);
+/** Keep only source URLs actually returned by a live signal or provider grounding.
+ * Never attach an unrelated article to a product just because one word matches.
+ */
+const keepVerifiedSources = (
+  products: WinningProductRaw[],
+  signals: Awaited<ReturnType<typeof getLiveSignals>>,
+  groundedSources: GroundingSource[],
+) => {
+  const allowed = new Map<string, string>();
+  for (const s of signals) allowed.set(s.url, s.title);
+  for (const s of groundedSources) {
+    if (typeof s.uri === "string" && /^https:\/\//i.test(s.uri)) {
+      allowed.set(s.uri, s.title || "");
     }
+  }
+  for (const p of products) {
+    const url = typeof p.sourceUrl === "string" ? p.sourceUrl : "";
+    if (!url || !allowed.has(url)) {
+      p.sourceUrl = "";
+      p.sourceTitle = "";
+      continue;
+    }
+    if (!p.sourceTitle) p.sourceTitle = allowed.get(url) || "";
   }
 };
 
@@ -183,13 +188,13 @@ export const huntWinningProducts = async (
   const run = async () => {
     const response = await aiGenerate({
       prompt: `[LIVE MARKET RESEARCH — today is ${dateContext()}]
-Identify the 30 products with the highest sales momentum THIS WEEK on TikTok Shop, Amazon and global marketplaces.
+Find product candidates worth investigating for dropshipping today. Do not claim sales momentum, sales volume, ad activity, or winning status unless a supplied source directly supports that claim. Treat Reddit/Hacker News/Google Trends as general demand clues, not proof that a specific product sells.
 
 RULES (CRITICAL):
-1. sourceUrl: ONLY a real URL — from your own knowledge of live marketplace pages, or from the LIVE MARKET SIGNALS list below. Never fabricate URLs.
+1. sourceUrl: ONLY a URL explicitly returned by live grounding or listed in LIVE MARKET SIGNALS. Do not use a general trend/article URL as a product listing. If no direct relevant product source exists, return an empty string.
 2. imageUrl: ONLY a direct public image URL (.jpg/.png/.webp); otherwise use exactly "placeholder".
 3. Product names must be specific (Brand + Model).
-4. trendScore: 0-100 based on current momentum signals (sales rank, social buzz, search volume).
+4. trendScore: a research-priority estimate from available evidence, NOT a probability of sale. If no product-specific evidence exists, use 0 and explain the missing evidence.
 5. Fill every field; if unknown, use "" instead of guessing.
 6. Return STRICT JSON: {"products": [ ... ]} with each item containing keys: name, niche, priceEstimate, reasonWhyWinning, potentialMargin, trendScore (number), imageUrl, sourceUrl, sourceTitle.${langDirective(lang)}${await liveContext(18)}`,
       json: true,
@@ -201,25 +206,14 @@ RULES (CRITICAL):
     const parsed = parseJsonSafe<any>(response.text || "{}", {});
     const products = unwrapArray<WinningProductRaw>(parsed, "products");
 
-    // Merge REAL grounding URLs (Gemini) into products without a source.
-    const unusedSources = [...response.sources];
+    // Scores are model estimates, not observed sales. Keep only links explicitly
+    // returned by provider grounding or by the live-signal collectors; never
+    // assign an unrelated source by fuzzy keyword match or array position.
     for (const p of products) {
-      const urlOk = typeof p.sourceUrl === "string" && p.sourceUrl.startsWith("http");
-      if (!urlOk) {
-        const match =
-          unusedSources.find((s) => p.name && s.title && p.name.toLowerCase().split(" ").some(w => w.length > 3 && s.title.toLowerCase().includes(w))) ||
-          unusedSources.shift();
-        if (match) {
-          p.sourceUrl = match.uri;
-          p.sourceTitle = p.sourceTitle || match.title;
-          unusedSources.splice(unusedSources.indexOf(match), 1);
-        }
-      }
       if (typeof p.trendScore !== "number" || Number.isNaN(p.trendScore)) p.trendScore = 0;
       p.trendScore = Math.max(0, Math.min(100, Math.round(p.trendScore)));
     }
-    // Free-source fallback: real scraped URLs for the remaining sourceless items.
-    attachSignalSources(products, signals);
+    keepVerifiedSources(products, signals, response.sources);
     return products;
   };
   return withRetry(run);
