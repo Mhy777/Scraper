@@ -163,14 +163,25 @@ const keepVerifiedSources = (
       allowed.set(s.uri, s.title || "");
     }
   }
+  const words = (value: string) => new Set(
+    value.toLowerCase().normalize("NFKD").replace(/[\\u0300-\\u036f]/g, "")
+      .split(/[^a-z0-9]+/).filter((w) => w.length >= 4)
+  );
   for (const p of products) {
     const url = typeof p.sourceUrl === "string" ? p.sourceUrl : "";
-    if (!url || !allowed.has(url)) {
+    const title = p.sourceTitle || allowed.get(url) || "";
+    const productWords = words(p.name || "");
+    const sourceWords = words(title);
+    const overlap = [...productWords].filter((w) => sourceWords.has(w));
+    // A URL being real is not enough: the source title must also refer to
+    // this product. General trend posts must not masquerade as product proof.
+    const relevant = overlap.length >= 2 || [...productWords].some((w) => w.length >= 7 && sourceWords.has(w));
+    if (!url || !allowed.has(url) || !relevant) {
       p.sourceUrl = "";
       p.sourceTitle = "";
       continue;
     }
-    if (!p.sourceTitle) p.sourceTitle = allowed.get(url) || "";
+    p.sourceTitle = title;
   }
 };
 
